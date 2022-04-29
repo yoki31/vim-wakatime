@@ -17,9 +17,11 @@ let s:VERSION = '9.0.1'
         finish
     endif
 
-    " Use constants for truthy check to improve readability
+    " Use constants to improve readability
     let s:true = 1
     let s:false = 0
+    let s:exit_code_config_parse_error = 103
+    let s:exit_code_api_key_error = 104
 
     " Only load plugin once
     if exists("g:loaded_wakatime")
@@ -40,20 +42,21 @@ let s:VERSION = '9.0.1'
     " Script Globals
     let s:home = ''
     if exists('$WAKATIME_HOME')
-        let s:home = expand('$WAKATIME_HOME')
+        let s:home = expand(expand('$WAKATIME_HOME'))
     else
-        let s:home = expand("$HOME")
+        let s:home = expand(expand("$HOME"))
     endif
     let s:home = substitute(s:home, '\', '/', 'g')
     let s:plugin_root_folder = substitute(expand("<sfile>:p:h:h"), '\', '/', 'g')
     let s:config_file = s:home . '/.wakatime.cfg'
     let s:default_configs = ['[settings]', 'debug = false', 'hidefilenames = false', 'ignore =', '    COMMIT_EDITMSG$', '    PULLREQ_EDITMSG$', '    MERGE_MSG$', '    TAG_EDITMSG$']
-    let s:data_file = s:home . '/.wakatime.data'
+    let s:shared_state_parent_dir = s:home . '/.wakatime'
+    let s:shared_state_file = s:shared_state_parent_dir . '/vim_shared_state'
     let s:has_reltime = has('reltime') && localtime() - 1 < split(split(reltimestr(reltime()))[0], '\.')[0]
     let s:config_file_already_setup = s:false
     let s:debug_mode_already_setup = s:false
     let s:is_debug_on = s:false
-    let s:local_cache_expire = 10  " seconds between reading s:data_file
+    let s:local_cache_expire = 10  " seconds between reading s:shared_state_file
     let s:last_heartbeat = {'last_activity_at': 0, 'last_heartbeat_at': 0, 'file': ''}
     let s:heartbeats_buffer = []
     let s:send_buffer_seconds = 30  " seconds between sending buffered heartbeats
@@ -106,11 +109,11 @@ let s:VERSION = '9.0.1'
             let path = s:home . '/.wakatime/wakatime-cli'
 
             " Check for wakatime-cli
-            if !filereadable(path) && executable('wakatime-cli')
+            if !filereadable(path) && s:Executable('wakatime-cli')
                 let s:wakatime_cli = 'wakatime-cli'
 
             " Check for wakatime
-            elseif !filereadable(path) && executable('wakatime')
+            elseif !filereadable(path) && s:Executable('wakatime')
                 let s:wakatime_cli = 'wakatime'
 
             " Check for wakatime-cli installed via Homebrew
@@ -130,7 +133,7 @@ let s:VERSION = '9.0.1'
     endfunction
 
     function! s:InstallCLI(use_external_python)
-        if !s:autoupdate_cli && !empty(s:wakatime_cli) && executable(s:wakatime_cli)
+        if !s:autoupdate_cli && s:Executable(s:wakatime_cli)
             return
         endif
 
@@ -189,7 +192,7 @@ let s:VERSION = '9.0.1'
                     let stdout = system(s:JoinArgs(cmd) . ' &')
                 endif
             endif
-        elseif !empty(v:progname) && executable(v:progname) && (has('python3') || has('python'))
+        elseif s:Executable(v:progname) && (has('python3') || has('python'))
             call s:InstallCLIRoundAbout()
         elseif has('python3')
             python3 << EOF
@@ -375,10 +378,10 @@ EOF
         if has('g:wakatime_PythonBinary')
             let python_bin = g:wakatime_PythonBinary
         endif
-        if empty(python_bin) || !filereadable(python_bin) || !executable(python_bin)
-            if executable('python3')
+        if !s:Executable(python_bin) || !filereadable(python_bin)
+            if s:Executable('python3')
                 let python_bin = 'python3'
-            elseif executable('python')
+            elseif s:Executable('python')
                 let python_bin = 'python'
             else
                 let paths = ['python3']
@@ -403,7 +406,7 @@ EOF
                 endwhile
             endif
         endif
-        if !empty(python_bin) && s:IsWindows() && (filereadable(printf('%sw', python_bin)) || executable(printf('%sw', python_bin)))
+        if s:IsWindows() && (filereadable(printf('%sw', python_bin)) || s:Executable(printf('%sw', python_bin)))
             let python_bin = printf('%sw', python_bin)
         endif
         return python_bin
@@ -634,10 +637,10 @@ EOF
 
     function! s:GetLastHeartbeat()
         if !s:last_heartbeat.last_activity_at || localtime() - s:last_heartbeat.last_activity_at > s:local_cache_expire
-            if !filereadable(s:data_file)
+            if !filereadable(s:shared_state_file)
                 return {'last_activity_at': 0, 'last_heartbeat_at': 0, 'file': ''}
             endif
-            let last = readfile(s:data_file, '', 3)
+            let last = readfile(s:shared_state_file, '', 3)
             if len(last) == 3
                 let s:last_heartbeat.last_heartbeat_at = last[1]
                 let s:last_heartbeat.file = last[2]
@@ -656,7 +659,8 @@ EOF
 
     function! s:SetLastHeartbeat(last_activity_at, last_heartbeat_at, file)
         call s:SetLastHeartbeatInMemory(a:last_activity_at, a:last_heartbeat_at, a:file)
-        call writefile([s:n2s(a:last_activity_at), s:n2s(a:last_heartbeat_at), a:file], s:data_file)
+        call mkdir(s:shared_state_parent_dir, "p", "0o700")
+        call writefile([s:n2s(a:last_activity_at), s:n2s(a:last_heartbeat_at), a:file], s:shared_state_file)
     endfunction
 
     function! s:EnoughTimePassed(now, last)
@@ -772,6 +776,13 @@ EOF
         endif
     endfunction
 
+    function! s:Executable(path)
+        if !empty(a:path) && executable(a:path)
+            return s:true
+        endif
+        return s:false
+    endfunction
+
 " }}}
 
 
@@ -790,10 +801,10 @@ EOF
 
     function! s:NeovimAsyncExitHandler(job_id, exit_code, event)
         let output = s:StripWhitespace(join(s:nvim_async_output, "\n"))
-        if a:exit_code == 104
+        if a:exit_code == s:exit_code_api_key_error
             let output .= 'Invalid API Key'
         endif
-        if (s:is_debug_on || a:exit_code == 103 || a:exit_code == 104) && (a:exit_code != 0 || output != '')
+        if (s:is_debug_on || a:exit_code == s:exit_code_config_parse_error || a:exit_code == s:exit_code_api_key_error) && output != ''
             echoerr printf('[WakaTime] Error %d: %s', a:exit_code, output)
         endif
     endfunction
@@ -809,7 +820,7 @@ EOF
 
     function! s:NeovimAsyncTodayExitHandler(job_id, exit_code, event)
         let output = s:StripWhitespace(join(s:nvim_async_output_today, "\n"))
-        if a:exit_code == 104
+        if a:exit_code == s:exit_code_api_key_error
             let output .= 'Invalid API Key'
         endif
         if output != ''
